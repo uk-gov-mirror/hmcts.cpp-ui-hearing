@@ -1,10 +1,11 @@
 import { AvailableHearing } from './../../model/available-hearing';
-import { HttpParams } from '@angular/common/http';
+import { HttpParams, HttpResponse } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 import { CppHttp } from '@cpp/core';
 import cleanDeep from 'clean-deep';
 import { Observable } from 'rxjs';
-import { SearchAvailableHearingsFormOptions } from '../../model';
+import { map } from 'rxjs/operators';
+import { BookingStatusResponse, SearchAvailableHearingsFormOptions } from '../../model';
 import { getCPPDate } from '../../utils/cpp-date';
 import { ListingNote } from '@cpp/scheduling';
 
@@ -36,17 +37,16 @@ export class ListingService {
     });
   }
 
-  validateSessionAvailability(courtScheduleId: string, duration?: number): Observable<unknown> {
-    const body = {
-      courtScheduleIdList: [{ courtScheduleId }],
-      ...(duration != null && { duration })
-    };
-
-    return this.api.command({
-      url: '/listing-query-api/query/api/rest/listing/sessionAvailabilityValidation',
-      requestType: 'application/vnd.listing.validate.session.availability+json',
-      body
-    });
+  getBookingStatus(bookingIds: string[]): Observable<BookingStatusResponse> {
+    return this.api
+      .command({
+        url: '/listing-query-api/query/api/rest/listing/bookingStatus',
+        requestType: 'application/vnd.listing.query.booking.status+json',
+        body: { bookingIds, reserveIfExpired: true }
+      })
+      .pipe(
+        map((response: HttpResponse<string>) => JSON.parse(response.body) as BookingStatusResponse)
+      );
   }
 
   private toHttpParams(params: any) {

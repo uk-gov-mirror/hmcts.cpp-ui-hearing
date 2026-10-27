@@ -10,6 +10,7 @@ import { Store, provideState, provideStore } from '@ngrx/store';
 import { of, throwError } from 'rxjs';
 import {
   ApiError,
+  BookingStatus,
   clearStandaloneAncillaryResults,
   getCurrentHearingAmendedByUserId,
   getCurrentHearingState,
@@ -1171,11 +1172,11 @@ describe('ShareResultContainerComponent', () => {
     });
   });
 
-  describe('Crown session availability validation', () => {
-    const crownHearing: HearingDetail = {
+  describe('session availability validation', () => {
+    const hearing: HearingDetail = {
       id: 'hearingId',
       type: { id: 'non-trial-id-1', description: 'Plea' },
-      jurisdictionType: 'CROWN',
+      jurisdictionType: 'MAGISTRATES',
       prosecutionCases: [
         {
           defendants: [
@@ -1189,31 +1190,21 @@ describe('ShareResultContainerComponent', () => {
       courtCentre: { id: 'court-centre-id' }
     } as HearingDetail;
 
-    const magistratesHearing = {
-      ...crownHearing,
-      jurisdictionType: 'MAGISTRATES'
-    } as HearingDetail;
-
-    const crownNextHearingLine = {
+    const nextHearingLine = (bookingReference: string, line = {}) => ({
       resultLineId: 'line-1',
-      shortCode: 'nhccs',
+      resultDefinitionId: 'resultDefinitionId',
+      shortCode: 'NHMC',
       resultPrompts: [
         {
           type: 'HIDDEN',
           promptId: 'booking-prompt-id',
           promptRef: 'bookingReference',
           label: 'Booking reference',
-          value: 'court-schedule-1'
-        },
-        {
-          type: 'DURATION',
-          promptId: 'duration-prompt-id',
-          promptRef: 'HEST',
-          label: 'Estimated duration',
-          value: [{ label: 'MINUTES', value: 30 }]
+          value: bookingReference
         }
-      ]
-    };
+      ],
+      ...line
+    });
 
     const draftResultWithLines = (lines: Record<string, unknown>) =>
       ({
@@ -1224,122 +1215,190 @@ describe('ShareResultContainerComponent', () => {
         resultLines: lines
       } as unknown as DraftResult);
 
-    const crownDraftResult = draftResultWithLines({ 'line-1': crownNextHearingLine });
+    const amendedNextHearingLine = (sharedBookingReference: string) =>
+      nextHearingLine('BOOKING2', {
+        sharedDate: '2026-06-01T10:00:00.000Z',
+        amendmentDate: '2026-06-02T10:00:00.000Z',
+        amendmentsLog: {
+          isAmended: true,
+          amendmentsRecord: [
+            {
+              resultPromptsRecord: [
+                { promptRef: 'bookingReference', value: sharedBookingReference }
+              ]
+            }
+          ]
+        }
+      });
+
+    const bookingStatus = (safeToShare: boolean, status: BookingStatus['status']) => ({
+      bookings: [{ bookingId: 'BOOKING1', safeToShare, status }]
+    });
 
     let component: ShareResultContainerComponent;
     let listingService: ListingService;
     let validationResultSpy: jest.Mock;
 
-    const setup = (hearing: HearingDetail, draftResult: DraftResult) => {
+    const setup = (draftResult: DraftResult, hearingState = HearingLockState.INITIALISED) => {
       validationResultSpy = jest.fn();
       const fixture = createFixture({
-        amendedByUserId: null,
+        amendedByUserId: 'userId1',
         currentUserId: 'userId1',
         draftResult,
-        hearingState: HearingLockState.INITIALISED,
+        hearingState,
         hearing
       });
       component = fixture.componentInstance;
       listingService = (component as any).listingService;
       component.sharedResultsValidation.subscribe(validationResultSpy);
-      return fixture;
     };
 
-    it('validates the booked session before sharing and shares when it is available', () => {
-      setup(crownHearing, crownDraftResult);
-      const validateSpy = jest
-        .spyOn(listingService, 'validateSessionAvailability')
-        .mockReturnValue(of({}));
+    describe('when sharing with relevant parties', () => {
+      it('should share when the reserved session is still held', () => {
+        setup(draftResultWithLines({ 'line-1': nextHearingLine('BOOKING1') }));
+        jest
+          .spyOn(listingService, 'getBookingStatus')
+          .mockReturnValue(of(bookingStatus(true, 'RESERVED')));
 
-      component.handleShareDraftResult();
+        component.handleShareDraftResult();
 
-      expect(validateSpy).toHaveBeenCalledWith('court-schedule-1', 30);
-      expect(store.dispatch).toHaveBeenCalledWith(ShareResultsActions.shareDraftResult());
-    });
+        expect(listingService.getBookingStatus).toHaveBeenCalledWith(['BOOKING1']);
+        expect(store.dispatch).toHaveBeenCalledWith(ShareResultsActions.shareDraftResult());
+      });
 
-    it('blocks sharing and emits a session availability error when the session is no longer available', () => {
-      setup(crownHearing, crownDraftResult);
-      jest
-        .spyOn(listingService, 'validateSessionAvailability')
-        .mockReturnValue(throwError(() => new HttpErrorResponse({ status: 400 })));
+      it('should not share when the reserved session is no longer held', () => {
+        setup(draftResultWithLines({ 'line-1': nextHearingLine('BOOKING1') }));
+        jest
+          .spyOn(listingService, 'getBookingStatus')
+          .mockReturnValue(of(bookingStatus(false, 'NOT_FOUND')));
 
-      component.handleShareDraftResult();
+        component.handleShareDraftResult();
 
-      expect(store.dispatch).not.toHaveBeenCalledWith(ShareResultsActions.shareDraftResult());
-      expect(validationResultSpy).toHaveBeenCalledWith({
-        hasAttendanceError: false,
-        hasTrialEffectivenessError: false,
-        hasSessionAvailabilityError: true
+        expect(store.dispatch).not.toHaveBeenCalledWith(ShareResultsActions.shareDraftResult());
+        expect(validationResultSpy).toHaveBeenCalledWith({
+          hasAttendanceError: false,
+          hasTrialEffectivenessError: false,
+          hasSessionAvailabilityError: true
+        });
+      });
+
+      it('should dispatch an ApiError and not share when the booking status cannot be checked', () => {
+        const error = new HttpErrorResponse({ status: 500 });
+        setup(draftResultWithLines({ 'line-1': nextHearingLine('BOOKING1') }));
+        jest.spyOn(listingService, 'getBookingStatus').mockReturnValue(throwError(() => error));
+
+        component.handleShareDraftResult();
+
+        expect(store.dispatch).toHaveBeenCalledWith(new ApiError(error));
+        expect(store.dispatch).not.toHaveBeenCalledWith(ShareResultsActions.shareDraftResult());
+      });
+
+      it('should share without checking when no result line holds a reserved session', () => {
+        setup(draftResultWithLines({ 'line-1': nextHearingLine(undefined) }));
+        jest.spyOn(listingService, 'getBookingStatus');
+
+        component.handleShareDraftResult();
+
+        expect(listingService.getBookingStatus).not.toHaveBeenCalled();
+        expect(store.dispatch).toHaveBeenCalledWith(ShareResultsActions.shareDraftResult());
       });
     });
 
-    it('dispatches an ApiError and does not show the availability banner when validation fails technically', () => {
-      setup(crownHearing, crownDraftResult);
-      jest
-        .spyOn(listingService, 'validateSessionAvailability')
-        .mockReturnValue(throwError(() => new HttpErrorResponse({ status: 500 })));
+    describe('when requesting approval', () => {
+      it('should request approval when the changed session is still held', () => {
+        setup(
+          draftResultWithLines({ 'line-1': amendedNextHearingLine('BOOKING1') }),
+          HearingLockState.SHARED_AMEND_LOCKED_USER_ERROR
+        );
+        jest
+          .spyOn(listingService, 'getBookingStatus')
+          .mockReturnValue(of(bookingStatus(true, 'REBOOKED')));
 
-      component.handleShareDraftResult();
+        component.handleShareAmendments();
 
-      expect(store.dispatch).toHaveBeenCalledWith(expect.any(ApiError));
-      expect(store.dispatch).not.toHaveBeenCalledWith(ShareResultsActions.shareDraftResult());
-      expect(validationResultSpy).not.toHaveBeenCalledWith(
-        expect.objectContaining({ hasSessionAvailabilityError: true })
-      );
-    });
-
-    it('validates a Crown next hearing even when the current hearing is magistrates (committal to Crown)', () => {
-      setup(magistratesHearing, crownDraftResult);
-      const validateSpy = jest
-        .spyOn(listingService, 'validateSessionAvailability')
-        .mockReturnValue(of({}));
-
-      component.handleShareDraftResult();
-
-      expect(validateSpy).toHaveBeenCalledWith('court-schedule-1', 30);
-      expect(store.dispatch).toHaveBeenCalledWith(ShareResultsActions.shareDraftResult());
-    });
-
-    it('does not validate when the booking is a magistrates next hearing (NHMC)', () => {
-      const magistratesBooking = draftResultWithLines({
-        'line-1': {
-          resultLineId: 'line-1',
-          shortCode: 'nhmc',
-          resultPrompts: [
-            {
-              type: 'TXT',
-              promptId: 'booking-prompt-id',
-              promptRef: 'bookingReference',
-              label: 'Booking reference',
-              value: 'provisional-booking-id'
-            }
-          ]
-        }
+        expect(listingService.getBookingStatus).toHaveBeenCalledWith(['BOOKING2']);
+        expect(store.dispatch).toHaveBeenCalledWith(
+          ShareResultsActions.requestApprovalForAmendments()
+        );
       });
-      setup(crownHearing, magistratesBooking);
-      const validateSpy = jest
-        .spyOn(listingService, 'validateSessionAvailability')
-        .mockReturnValue(of({}));
 
-      component.handleShareDraftResult();
+      it('should not request approval when the changed session is no longer held', () => {
+        setup(
+          draftResultWithLines({ 'line-1': amendedNextHearingLine('BOOKING1') }),
+          HearingLockState.SHARED_AMEND_LOCKED_USER_ERROR
+        );
+        jest
+          .spyOn(listingService, 'getBookingStatus')
+          .mockReturnValue(of(bookingStatus(false, 'NOT_FOUND')));
 
-      expect(validateSpy).not.toHaveBeenCalled();
-      expect(store.dispatch).toHaveBeenCalledWith(ShareResultsActions.shareDraftResult());
+        component.handleShareAmendments();
+
+        expect(store.dispatch).not.toHaveBeenCalledWith(
+          ShareResultsActions.requestApprovalForAmendments()
+        );
+        expect(validationResultSpy).toHaveBeenCalledWith({
+          hasAttendanceError: false,
+          hasTrialEffectivenessError: false,
+          hasSessionAvailabilityError: true
+        });
+      });
+
+      it('should not request approval when a session that was not changed is no longer held', () => {
+        setup(
+          draftResultWithLines({ 'line-1': amendedNextHearingLine('BOOKING2') }),
+          HearingLockState.SHARED_AMEND_LOCKED_USER_ERROR
+        );
+        jest
+          .spyOn(listingService, 'getBookingStatus')
+          .mockReturnValue(of(bookingStatus(false, 'NOT_FOUND')));
+
+        component.handleShareAmendments();
+
+        expect(listingService.getBookingStatus).toHaveBeenCalledWith(['BOOKING2']);
+        expect(store.dispatch).not.toHaveBeenCalledWith(
+          ShareResultsActions.requestApprovalForAmendments()
+        );
+        expect(validationResultSpy).toHaveBeenCalledWith({
+          hasAttendanceError: false,
+          hasTrialEffectivenessError: false,
+          hasSessionAvailabilityError: true
+        });
+      });
     });
 
-    it('shares without validation when the Crown next hearing has no booked session', () => {
-      const draftWithoutBooking = draftResultWithLines({
-        'line-1': { resultLineId: 'line-1', shortCode: 'nhccs', resultPrompts: [] }
+    describe('when validating amendments', () => {
+      beforeEach(() => {
+        setup(
+          draftResultWithLines({ 'line-1': amendedNextHearingLine('BOOKING1') }),
+          HearingLockState.APPROVAL_REQUESTED
+        );
       });
-      setup(crownHearing, draftWithoutBooking);
-      const validateSpy = jest
-        .spyOn(listingService, 'validateSessionAvailability')
-        .mockReturnValue(of({}));
 
-      component.handleShareDraftResult();
+      it('should validate the amendments when the reserved session is still held', () => {
+        jest
+          .spyOn(listingService, 'getBookingStatus')
+          .mockReturnValue(of(bookingStatus(true, 'RESERVED')));
 
-      expect(validateSpy).not.toHaveBeenCalled();
-      expect(store.dispatch).toHaveBeenCalledWith(ShareResultsActions.shareDraftResult());
+        component.handleApproveAmendments();
+
+        expect(listingService.getBookingStatus).toHaveBeenCalledWith(['BOOKING2']);
+        expect(store.dispatch).toHaveBeenCalledWith(ShareResultsActions.approveAmendments());
+      });
+
+      it('should not validate the amendments when the reserved session is no longer held', () => {
+        jest
+          .spyOn(listingService, 'getBookingStatus')
+          .mockReturnValue(of(bookingStatus(false, 'NOT_FOUND')));
+
+        component.handleApproveAmendments();
+
+        expect(store.dispatch).not.toHaveBeenCalledWith(ShareResultsActions.approveAmendments());
+        expect(validationResultSpy).toHaveBeenCalledWith({
+          hasAttendanceError: false,
+          hasTrialEffectivenessError: false,
+          hasSessionAvailabilityError: true
+        });
+      });
     });
   });
 });

@@ -1,64 +1,45 @@
+import { uniq } from 'lodash-es';
 import {
-  deserializeDurationValue,
-  getMinutesFromDurationValue
-} from '../core/prompt-choices/duration';
+  isActiveDraftResultLine,
+  isDirtyDraftResultLine,
+  isResolvedDraftResultLine
+} from '../core/helpers';
 import {
+  AnyDraftResultLine,
   DraftResult,
   DraftResultPrompt,
-  DraftResultPromptValue,
   ResolvedDraftResultLine
 } from '../results.interfaces';
 
 const BOOKING_REFERENCE_PROMPT_REF = 'bookingReference';
-const DURATION_PROMPT_TYPE = 'DURATION';
-// "Next hearing in Crown Court" - the only result that books a Crown court
-// schedule without a provisional booking (magistrates' NHMC is provisionally
-// booked and must NOT be re-validated).
-const NEXT_HEARING_IN_CROWN_COURT = 'NHCCS';
+const EXISTING_HEARING_PROMPT_REF = 'existingHearingId';
 
-export interface SessionAvailabilityValidationData {
-  courtScheduleId: string;
-  duration?: number;
-}
+const findPromptValue = (prompts: DraftResultPrompt[], promptRef: string): string | undefined =>
+  prompts.find(prompt => prompt.promptRef === promptRef)?.value as string;
 
-export const getSessionAvailabilityValidationData = (
-  draftResult: DraftResult
-): SessionAvailabilityValidationData[] => {
-  const validations: SessionAvailabilityValidationData[] = [];
+/**
+ * Get the booking references whose reserved session must still be held before
+ * the draft result can be shared. Only active result lines changed since they
+ * were last shared are considered, skipping those attached to an existing
+ * hearing.
+ *
+ * @param draftResult the draft result to be shared
+ * @returns the booking references to check
+ */
+export const getBookingReferencesToCheck = (draftResult: DraftResult): string[] => {
+  const resultLines = Object.values(draftResult.resultLines) as AnyDraftResultLine[];
 
-  const resultLines = Object.values(draftResult?.resultLines || {}) as ResolvedDraftResultLine[];
-
-  for (const resultLine of resultLines) {
-    if (resultLine?.shortCode?.toUpperCase() !== NEXT_HEARING_IN_CROWN_COURT) {
-      continue;
-    }
-
-    const prompts = resultLine.resultPrompts || [];
-    const courtScheduleId = prompts.find(
-      prompt => prompt.promptRef === BOOKING_REFERENCE_PROMPT_REF
-    )?.value as string;
-
-    if (!courtScheduleId) {
-      continue;
-    }
-
-    validations.push({ courtScheduleId, duration: getDurationInMinutes(prompts) });
-  }
-
-  return validations;
-};
-
-const getDurationInMinutes = (prompts: DraftResultPrompt[]): number | undefined => {
-  const durationPrompt = prompts.find(prompt => prompt.type === DURATION_PROMPT_TYPE);
-
-  if (!durationPrompt || durationPrompt.value == null) {
-    return undefined;
-  }
-
-  const value =
-    typeof durationPrompt.value === 'string'
-      ? deserializeDurationValue(durationPrompt.value)
-      : (durationPrompt.value as DraftResultPromptValue[]);
-
-  return getMinutesFromDurationValue(value);
+  return uniq(
+    resultLines
+      .filter(
+        (resultLine): resultLine is ResolvedDraftResultLine =>
+          isResolvedDraftResultLine(resultLine) &&
+          isActiveDraftResultLine(resultLine) &&
+          isDirtyDraftResultLine(resultLine)
+      )
+      .map(({ resultPrompts = [] }) => resultPrompts)
+      .filter(resultPrompts => !findPromptValue(resultPrompts, EXISTING_HEARING_PROMPT_REF))
+      .map(resultPrompts => findPromptValue(resultPrompts, BOOKING_REFERENCE_PROMPT_REF))
+      .filter(Boolean)
+  );
 };

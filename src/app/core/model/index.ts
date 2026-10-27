@@ -4,6 +4,7 @@ export * from './application';
 export { ApplicationByTypeMap } from './application';
 export * from './associated-person';
 export * from './available-hearing';
+export * from './booking-status';
 export * from './case-markers';
 export * from './check-in';
 export * from './check-in-hearing-summary';

@@ -29,13 +29,13 @@ import {
 import { ResolvedDraftResultLine } from '../results.interfaces';
 import { ModalService } from '@cpp/pdk';
 import { WelshDefendantTranslateComponent } from './welsh-defendant-translate.component';
-import { combineLatest, forkJoin, of, throwError } from 'rxjs';
-import { catchError, map, switchMap, take } from 'rxjs/operators';
+import { combineLatest, of } from 'rxjs';
+import { map, switchMap, take } from 'rxjs/operators';
 
 import { ShareResultActionBarComponent } from './share-result-action-bar.component';
 import { AsyncPipe } from '@angular/common';
 import { getHearingTypes, HearingType } from '@cpp/reference-data';
-import { getSessionAvailabilityValidationData } from './session-availability.helper';
+import { getBookingReferencesToCheck } from './session-availability.helper';
 
 export interface ShareValidationResult {
   hasAttendanceError: boolean;
@@ -97,7 +97,9 @@ export class ShareResultContainerComponent {
   ) {}
 
   handleApproveAmendments() {
-    this.store.dispatch(ShareResultsActions.approveAmendments());
+    this.validateSessionAvailability(() =>
+      this.store.dispatch(ShareResultsActions.approveAmendments())
+    );
   }
 
   handleCancelAmendments() {
@@ -111,7 +113,9 @@ export class ShareResultContainerComponent {
   }
 
   handleShareAmendments() {
-    this.store.dispatch(ShareResultsActions.requestApprovalForAmendments());
+    this.validateSessionAvailability(() =>
+      this.store.dispatch(ShareResultsActions.requestApprovalForAmendments())
+    );
   }
 
   private validateAndShare(
@@ -145,43 +149,29 @@ export class ShareResultContainerComponent {
       return;
     }
 
-    this.validateSessionAvailabilityAndShare(withWelshTranslate, individualDefendants);
+    this.validateSessionAvailability(() =>
+      this.proceedWithResultShare(withWelshTranslate, individualDefendants)
+    );
   }
 
-  private validateSessionAvailabilityAndShare(
-    withWelshTranslate: boolean,
-    individualDefendants: IndividualDefendant[]
-  ): void {
+  private validateSessionAvailability(onSessionAvailable: () => void): void {
     this.draftResult$
       .pipe(
         take(1),
-        switchMap(draftResult => {
-          const validations = getSessionAvailabilityValidationData(draftResult);
-
-          if (validations.length === 0) {
-            return of(true);
-          }
-
-          return forkJoin(
-            validations.map(({ courtScheduleId, duration }) =>
-              this.listingService.validateSessionAvailability(courtScheduleId, duration).pipe(
-                map(() => true),
-                catchError((httpError: HttpErrorResponse) => {
-                  if (httpError.status === 400) {
-                    return of(false);
-                  }
-                  return throwError(() => httpError);
-                })
-              )
-            )
-          ).pipe(map(results => results.every(Boolean)));
-        }),
+        map(draftResult => getBookingReferencesToCheck(draftResult)),
+        switchMap(bookingReferences =>
+          bookingReferences.length === 0
+            ? of(true)
+            : this.listingService
+                .getBookingStatus(bookingReferences)
+                .pipe(map(({ bookings }) => bookings.every(({ safeToShare }) => safeToShare)))
+        ),
         takeUntilDestroyed(this.destroyRef)
       )
       .subscribe({
         next: sessionAvailable => {
           if (sessionAvailable) {
-            this.proceedWithResultShare(withWelshTranslate, individualDefendants);
+            onSessionAvailable();
           } else {
             this.sharedResultsValidation.emit({
               hasAttendanceError: false,
